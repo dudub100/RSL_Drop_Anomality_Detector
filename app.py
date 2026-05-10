@@ -145,7 +145,7 @@ survival_confidence = st.sidebar.slider(
 )
 
 
-anomaly_threshold = st.sidebar.slider("Anomaly Threshold (%)", 0.001, 5.0, 0.1, format="%.3f%%")
+#anomaly_threshold = st.sidebar.slider("Anomaly Threshold (%)", 0.001, 5.0, 0.1, format="%.3f%%")
 
 # --- Execution Logic ---
 if st.sidebar.button("Analyze Event", type="primary", use_container_width=True):
