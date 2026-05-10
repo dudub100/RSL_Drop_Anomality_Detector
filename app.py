@@ -126,6 +126,25 @@ fade_depth = st.sidebar.number_input("Fade Depth (dB Drop)", min_value=1.0, max_
 duration_minutes = st.sidebar.number_input("Event Duration (Minutes)", min_value=1.0, max_value=1440.0, value=30.0, step=1.0)
 
 st.sidebar.markdown("---")
+
+st.sidebar.header("3. Detection Thresholds")
+
+# Hardcoded or Dropdown SLA target
+annual_sla_target = st.sidebar.selectbox(
+    "Link Availability Target (Annual)", 
+    options=[0.1, 0.01, 0.001, 0.0001], 
+    index=2, 
+    format_func=lambda x: f"{x}% ({(x/100)*525600:.0f} mins/yr)"
+)
+
+# Adjustable slider for duration confidence
+survival_confidence = st.sidebar.slider(
+    "Duration Anomaly Confidence limit", 
+    min_value=0.001, max_value=5.0, value=0.1, step=0.05, format="%.3f%%",
+    help="Triggers an anomaly if the chance of the storm lasting this long drops below this percentage."
+)
+
+
 anomaly_threshold = st.sidebar.slider("Anomaly Threshold (%)", 0.001, 5.0, 0.1, format="%.3f%%")
 
 # --- Execution Logic ---
@@ -178,14 +197,16 @@ if st.sidebar.button("Analyze Event", type="primary", use_container_width=True):
     is_anomaly = False
     reasons = []
     
-    if annual_prob < (anomaly_threshold / 100.0):
+    # 1. Check severity against the Link SLA
+    if annual_prob < annual_sla_target:
         is_anomaly = True
-        reasons.append("The severity of the fade depth exceeds the local climatic boundaries.")
+        reasons.append(f"Severity Violation: The fade depth requires a storm rarer than the link's {annual_sla_target}% design limit.")
     
-    if surv_prob_pct < anomaly_threshold:
+    # 2. Check duration against the User Confidence Threshold
+    if surv_prob_pct < survival_confidence:
         is_anomaly = True
-        reasons.append(f"The event duration ({duration_minutes} mins) mathematically violates the atmospheric decay curve for a {r_intensity:.1f} mm/hr storm in a {climate['type']} region.")
-
+        reasons.append(f"Duration Violation: The chance of this storm surviving for {duration_minutes} mins is {surv_prob_pct:.4f}%, which falls below your {survival_confidence}% confidence limit.")
+    
     if is_anomaly:
         st.error("🚨 **CLASSIFICATION: ANOMALY (NON-RAIN EVENT)**")
         for r in reasons:
