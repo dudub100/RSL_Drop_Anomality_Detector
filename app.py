@@ -140,7 +140,7 @@ annual_sla_target = st.sidebar.selectbox(
 # Adjustable slider for duration confidence
 survival_confidence = st.sidebar.slider(
     "Duration Anomaly Confidence limit", 
-    min_value=0.001, max_value=5.0, value=1, step=0.05, format="%.3f%%",
+    min_value=0.001, max_value=5.0, value=1.0, step=0.05, format="%.3f%%",
     help="Triggers an anomaly if the chance of the storm lasting this long drops below this percentage."
 )
 
