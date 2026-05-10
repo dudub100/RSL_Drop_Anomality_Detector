@@ -31,8 +31,8 @@ def calculate_rain_intensity(freq_GHz, fade_depth_dB, distance_km):
     gamma_target = fade_depth_dB / distance_km
 
     def specific_attenuation_error(R_test):
-        # Use the universally public specific_attenuation function
-        gamma_test = itur.models.itu838.specific_attenuation(
+        # FIX: Added 'rain_' prefix to the ITU-R P.838 function call
+        gamma_test = itur.models.itu838.rain_specific_attenuation(
             f=freq_GHz, R=R_test, el=0, tau=90
         )
         
@@ -47,8 +47,7 @@ def calculate_rain_intensity(freq_GHz, fade_depth_dB, distance_km):
         r_result = brentq(specific_attenuation_error, a=0.01, b=1000.0)
         return float(r_result)
     except ValueError:
-        # If the fade is so incredibly deep it requires > 1000 mm/hr of rain,
-        # it is mathematically an extreme anomaly. We cap it at 1000.
+        # If the fade is so deep it requires > 1000 mm/hr of rain, cap it at 1000
         return 1000.0
 
 @st.cache_data(show_spinner=False)
