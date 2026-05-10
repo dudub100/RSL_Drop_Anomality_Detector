@@ -1,111 +1,172 @@
 import streamlit as st
 import itur
+import numpy as np
+from scipy.optimize import brentq
+from scipy.stats import lognorm
 from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
 
 # ==========================================
 # Caching Heavy Computations & API Calls
 # ==========================================
 @st.cache_data(show_spinner=False)
 def get_coordinates(city_name):
-    """Fetches latitude and longitude for a given city name using Geopy."""
-    geolocator = Nominatim(user_agent="rain_anomaly_detector_app")
+    """Fetches latitude and longitude using Geopy."""
+    geolocator = Nominatim(user_agent="rain_anomaly_detector_v2")
     try:
-        location = geolocator.geocode(city_name)
+        location = geolocator.geocode(city_name, timeout=10)
         if location:
             return location.latitude, location.longitude, location.address
-        else:
-            return None, None, None
+        return None, None, None
     except Exception as e:
         st.error(f"Geocoding error: {e}")
         return None, None, None
 
 @st.cache_data(show_spinner=False)
+def calculate_rain_intensity(freq_GHz, fade_depth_dB, distance_km):
+    """
+    Step 1: Reverses ITU-R P.838 to find the physical Rain Rate (mm/hr) 
+    required to cause the observed fade.
+    """
+    gamma_r = fade_depth_dB / distance_km
+    k, alpha = itur.models.itu838.specific_attenuation_coefficients(f=freq_GHz, el=0, tau=90)
+    
+    # Safely extract values if returned as astropy units
+    k = getattr(k, 'value', k)
+    alpha = getattr(alpha, 'value', alpha)
+    
+    rain_rate = (gamma_r / k) ** (1.0 / alpha)
+    return float(rain_rate)
+
 @st.cache_data(show_spinner=False)
-def check_rain_probability_itur(freq_GHz, fade_depth_dB, duration_sec):
+def estimate_annual_probability(lat, lon, freq_GHz, distance_km, fade_depth_dB):
     """
-    Calculates the probability that a rain event maintains a specific 
-    fade depth for a given duration using ITU-R P.1623.
+    Step 2: Uses Brent's root-finding method to reverse ITU-R P.530 and 
+    find the annual probability of this fade depth occurring.
     """
-    try:
-        # P.1623 fade_duration_probability takes ONLY D, A, el, and f.
-        prob_exceeded = itur.models.itu1623.fade_duration_probability(
-            D=duration_sec, 
-            A=fade_depth_dB,
-            el=5.0,     # Safest lower bound for terrestrial approximation
-            f=freq_GHz
+    def attenuation_error(p_test):
+        A_test = itur.models.itu530.rain_attenuation(
+            lat, lon, distance_km, freq_GHz, el=0, p=p_test, tau=90
         )
-        
-        # Safely extract the float value (in case it returns an astropy unit)
-        if hasattr(prob_exceeded, 'value'):
-            return float(prob_exceeded.value)
-        return float(prob_exceeded)
-        
-    except Exception as e:
-        st.error(f"ITU-R Calculation Error: {e}")
-        return None
+        A_val = getattr(A_test, 'value', A_test)
+        return A_val - fade_depth_dB
+
+    try:
+        # Search between 0.00001% (extremely rare) and 10.0% (extremely common)
+        p_result = brentq(attenuation_error, a=0.00001, b=10.0)
+        return float(p_result)
+    except ValueError:
+        # If it fails, the fade is outside normal atmospheric boundaries
+        # We test the 0.00001% boundary to see if the fade is mathematically too deep
+        test_deep = attenuation_error(0.00001)
+        if test_deep < 0: 
+            return 0.000001 # Fade is deeper than the 0.00001% limit
+        return 10.0 # Fade is shallower than the 10% limit
+
+@st.cache_data(show_spinner=False)
+def duration_survival_probability(rain_rate_mmhr, duration_minutes):
+    """
+    Step 3: Meteorological Log-Normal Survival Model.
+    Calculates the probability that a storm of intensity R lasts longer than T.
+    """
+    # Empirical Inverse Power Law for Mean Rain Duration
+    # Higher intensity = exponentially shorter mean duration
+    mean_duration = 100.0 * (rain_rate_mmhr ** -0.6)
+    
+    # Standard deviation for meteorological rain events is roughly 1.0
+    sigma = 1.0 
+    
+    # Calculate Log-Normal Survival Function (1 - CDF)
+    p_survival = lognorm.sf(duration_minutes, s=sigma, scale=mean_duration)
+    
+    return float(p_survival), float(mean_duration)
+
 # ==========================================
 # Streamlit UI
 # ==========================================
-st.set_page_config(page_title="RSL Anomaly Detector", layout="centered")
+st.set_page_config(page_title="Deep Fade Anomaly Detector", layout="wide")
 
-st.title("📡 RSL Drop Classifier: Rain vs. Anomaly")
-st.markdown("""
-This tool uses the **ITU-R P.1623** standard to evaluate whether a specific Received Signal Level (RSL) drop physically matches the profile of a local rain cell, or if it should be flagged as a Wet Radome / Hardware Anomaly.
-""")
+st.title("📡 RSL Deep Fade Anomaly Detector")
+st.markdown("This tool validates RSL telemetry by separating the **radio physics** from the **weather statistics**. It calculates the physical rain required for a fade, checks if your climate supports it, and tests if the duration is physically possible.")
 
-st.divider()
+# --- Sidebar Inputs ---
+st.sidebar.header("1. Link Configuration")
+city_input = st.sidebar.text_input("Location (City)", value="Tel Aviv, Israel")
+freq_GHz = st.sidebar.number_input("Carrier Frequency (GHz)", min_value=1.0, max_value=100.0, value=18.0, step=1.0)
+distance_km = st.sidebar.number_input("Link Length (km)", min_value=0.1, max_value=50.0, value=5.0, step=0.5)
 
-# --- Input Form ---
-with st.container():
-    st.subheader("Event Parameters")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        city_input = st.text_input("City/Location", value="Tel Aviv, Israel")
-        freq_GHz = st.number_input("Carrier Frequency (GHz)", min_value=1.0, max_value=100.0, value=18.0, step=1.0)
-        
-    with col2:
-        fade_depth = st.number_input("Fade Depth (dB Drop)", min_value=1.0, max_value=80.0, value=25.0, step=1.0)
-        duration_minutes = st.number_input("Fade Duration (Minutes)", min_value=0.1, max_value=1440.0, value=10.0, step=1.0)
+st.sidebar.header("2. RSL Event Telemetry")
+fade_depth = st.sidebar.number_input("Fade Depth (dB Drop)", min_value=1.0, max_value=100.0, value=25.0, step=1.0)
+duration_minutes = st.sidebar.number_input("Event Duration (Minutes)", min_value=1.0, max_value=1440.0, value=45.0, step=1.0)
 
-    # Allow user to set the strictness of the anomaly detector
-    st.markdown("---")
-    threshold_pct = st.slider(
-        "Anomaly Threshold (%) - If probability falls below this, it is flagged as an anomaly.", 
-        min_value=0.001, max_value=5.0, value=1.0, step=0.01, format="%.3f%%"
-    )
+st.sidebar.markdown("---")
+anomaly_threshold = st.sidebar.slider("Anomaly Threshold (%)", 0.001, 5.0, 0.1, format="%.3f%%")
 
 # --- Execution Logic ---
-if st.button("Evaluate RSL Drop", type="primary", use_container_width=True):
-    duration_seconds = duration_minutes * 60.0
-    
-    with st.spinner("Locating coordinates..."):
+if st.sidebar.button("Analyze Event", type="primary", use_container_width=True):
+    with st.spinner("Geocoding Location..."):
         lat, lon, address = get_coordinates(city_input)
         
     if lat is None:
-        st.error("Location not found. Please try a different city name.")
-    else:
-        st.caption(f"📍 **Location:** {address} (Lat: {lat:.4f}, Lon: {lon:.4f})")
+        st.error("Location not found. Please try a different query.")
+        st.stop()
         
-        with st.spinner("Calculating ITU-R P.1623 Survival Probability..."):
-            prob = check_rain_probability_itur(freq_GHz, fade_depth, duration_seconds)
-            
-        if prob is not None:
-            prob_pct = prob * 100.0
-            
-            st.divider()
-            st.subheader("Analysis Results")
-            
-            # Display the raw metric
-            col_metric, col_label = st.columns([1, 1])
-            with col_metric:
-                st.metric(label="Likelihood of Rain Duration", value=f"{prob_pct:.4f}%")
-                
-            # Decision Logic / Classification Label
-            with col_label:
-                if prob_pct >= threshold_pct:
-                    st.success("🌧️ **CLASSIFICATION: RAIN**")
-                    st.info(f"This duration is statistically normal for a {fade_depth} dB rain fade in this region.")
-                else:
-                    st.error("🚨 **CLASSIFICATION: ANOMALY**")
-                    st.warning(f"Mathematical limit exceeded. Rain rarely maintains a {fade_depth} dB drop for {duration_minutes} minutes here. \n\n**Likely Causes:** Wet Radome (WAA), Hardware Degradation, or Antenna Misalignment.")
+    st.caption(f"📍 **Location Profile:** {address} (Lat: {lat:.4f}, Lon: {lon:.4f})")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # STEP 1: Rain Intensity
+    with st.spinner("Calculating physical rain constraints..."):
+        r_intensity = calculate_rain_intensity(freq_GHz, fade_depth, distance_km)
+    
+    with col1:
+        st.subheader("Step 1: Physics")
+        st.metric("Equivalent Rain Rate", f"{r_intensity:.1f} mm/hr")
+        st.info(f"A {fade_depth}dB drop at {freq_GHz}GHz over {distance_km}km requires a storm core of **{r_intensity:.1f} mm/hr**.")
+
+    # STEP 2: Annual Probability
+    with st.spinner("Querying ITU-R environmental models..."):
+        annual_prob = estimate_annual_probability(lat, lon, freq_GHz, distance_km, fade_depth)
+    
+    with col2:
+        st.subheader("Step 2: Climate")
+        if annual_prob < 0.0001:
+            st.metric("Annual Probability", "< 0.0001%")
+            st.error("This fade depth is almost mathematically impossible for this region.")
+        else:
+            st.metric("Annual Probability", f"{annual_prob:.4f}%")
+            st.info(f"This region is expected to experience fades of {fade_depth}dB roughly **{(annual_prob/100)*525600:.0f} minutes** per year.")
+
+    # STEP 3: Duration Survival
+    with st.spinner("Running meteorological survival model..."):
+        surv_prob, mean_dur = duration_survival_probability(r_intensity, duration_minutes)
+        surv_prob_pct = surv_prob * 100.0
+        
+    with col3:
+        st.subheader("Step 3: Duration")
+        st.metric("Probability of Duration", f"{surv_prob_pct:.4f}%")
+        st.info(f"An intense {r_intensity:.1f} mm/hr storm averages only **{mean_dur:.1f} minutes**. The chance of it lasting {duration_minutes} minutes is **{surv_prob_pct:.4f}%**.")
+
+    # --- Final Classification ---
+    st.divider()
+    st.subheader("Final Classification")
+    
+    is_anomaly = False
+    reasons = []
+    
+    if annual_prob < (anomaly_threshold / 100.0): # Convert threshold to raw float for annual check
+        is_anomaly = True
+        reasons.append("The fade depth is too severe for the local climate.")
+    
+    if surv_prob_pct < anomaly_threshold:
+        is_anomaly = True
+        reasons.append(f"The event duration ({duration_minutes} mins) physically violates the fluid dynamics of a {r_intensity:.1f} mm/hr storm.")
+
+    if is_anomaly:
+        st.error("🚨 **CLASSIFICATION: ANOMALY (NON-RAIN EVENT)**")
+        for r in reasons:
+            st.write(f"- {r}")
+        st.warning("**Recommended Action:** Inspect telemetry for Wet Radome Attenuation (WAA), hardware failure, or antenna misalignment.")
+    else:
+        st.success("🌧️ **CLASSIFICATION: NORMAL RAIN FADE**")
+        st.write("This event fits within the physical and climatological boundaries of the ITU-R and meteorological models.")
