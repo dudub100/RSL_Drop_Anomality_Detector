@@ -20,27 +20,29 @@ def get_coordinates(city_name):
         return None, None, None
 
 @st.cache_data(show_spinner=False)
-def check_rain_probability_itur(lat, lon, freq_GHz, fade_depth_dB, duration_sec):
+@st.cache_data(show_spinner=False)
+def check_rain_probability_itur(freq_GHz, fade_depth_dB, duration_sec):
     """
     Calculates the probability that a rain event maintains a specific 
     fade depth for a given duration using ITU-R P.1623.
     """
     try:
-        # el=0 for terrestrial link, p=90 for Vertical polarization
+        # P.1623 fade_duration_probability takes ONLY D, A, el, and f.
         prob_exceeded = itur.models.itu1623.fade_duration_probability(
-            lat=lat, 
-            lon=lon, 
-            f=freq_GHz, 
-            el=0, 
-            p=90, 
             D=duration_sec, 
-            A=fade_depth_dB
+            A=fade_depth_dB,
+            el=5.0,     # Safest lower bound for terrestrial approximation
+            f=freq_GHz
         )
+        
+        # Safely extract the float value (in case it returns an astropy unit)
+        if hasattr(prob_exceeded, 'value'):
+            return float(prob_exceeded.value)
         return float(prob_exceeded)
+        
     except Exception as e:
         st.error(f"ITU-R Calculation Error: {e}")
         return None
-
 # ==========================================
 # Streamlit UI
 # ==========================================
@@ -86,7 +88,7 @@ if st.button("Evaluate RSL Drop", type="primary", use_container_width=True):
         st.caption(f"📍 **Location:** {address} (Lat: {lat:.4f}, Lon: {lon:.4f})")
         
         with st.spinner("Calculating ITU-R P.1623 Survival Probability..."):
-            prob = check_rain_probability_itur(lat, lon, freq_GHz, fade_depth, duration_seconds)
+            prob = check_rain_probability_itur(freq_GHz, fade_depth, duration_seconds)
             
         if prob is not None:
             prob_pct = prob * 100.0
