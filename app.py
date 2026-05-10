@@ -26,17 +26,30 @@ def get_coordinates(city_name):
 def calculate_rain_intensity(freq_GHz, fade_depth_dB, distance_km):
     """
     Step 1: Reverses ITU-R P.838 to find the physical Rain Rate (mm/hr) 
-    required to cause the observed fade.
+    required to cause the observed fade, using robust root-finding.
     """
-    gamma_r = fade_depth_dB / distance_km
-    k, alpha = itur.models.itu838.specific_attenuation_coefficients(f=freq_GHz, el=0, tau=90)
-    
-    # Safely extract values if returned as astropy units
-    k = getattr(k, 'value', k)
-    alpha = getattr(alpha, 'value', alpha)
-    
-    rain_rate = (gamma_r / k) ** (1.0 / alpha)
-    return float(rain_rate)
+    gamma_target = fade_depth_dB / distance_km
+
+    def specific_attenuation_error(R_test):
+        # Use the universally public specific_attenuation function
+        gamma_test = itur.models.itu838.specific_attenuation(
+            f=freq_GHz, R=R_test, el=0, tau=90
+        )
+        
+        # Safely extract value if astropy unit is returned
+        gamma_val = getattr(gamma_test, 'value', gamma_test)
+        
+        # We want the difference to be 0
+        return gamma_val - gamma_target
+
+    try:
+        # Search for a rain rate between 0.01 mm/hr and 1000.0 mm/hr
+        r_result = brentq(specific_attenuation_error, a=0.01, b=1000.0)
+        return float(r_result)
+    except ValueError:
+        # If the fade is so incredibly deep it requires > 1000 mm/hr of rain,
+        # it is mathematically an extreme anomaly. We cap it at 1000.
+        return 1000.0
 
 @st.cache_data(show_spinner=False)
 def estimate_annual_probability(lat, lon, freq_GHz, distance_km, fade_depth_dB):
